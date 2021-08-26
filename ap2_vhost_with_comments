@@ -1,0 +1,115 @@
+#!/bin/env bash
+
+#~Make making new dirs and optional feature maybe? idk
+#~It would be helpful to search for a way to assign some value to a var based on either this or that, without if statements(like ? and : in other langs)
+#~i would prefer to only check the return value of mkdir
+
+# args: 
+	# -d for dir where site will be created
+	# -P for port
+	# -A for alias
+	# -I for ip listener address for vhost
+	# -D for supplying string of directives and their options(directives seperated by '-', options by',')
+	# -h for index.html-file to copy. else one will be generated
+	# -u for using existing dir given in -d(if no dir is given to -d, this will look for /var/www/html/SITENAME and exit with error code 1 if not found)
+	# -r reload apache after script is done
+
+#~Check that last arg is not attached to any of the optargs which require user-input(as opposed to -r and -u)
+if [[ ${@: -2:1} =~ '^-[dDAIPh]$' ]]; then echo "ERROR: last arg must be sitename, not an optional flag-value"; exit 1; fi
+
+#~Reading args
+while getopts d:D:A:I:P:h:u:r: flag
+do
+	case "${flag}" in
+		d) 
+			#~Check if user-supplied dir is valid, exit if not
+			if [ ! -d ${OPTARG} ]; then echo "ERROR: \"${flag}\" points to invalid dir at \"${OPTARG}\""; exit 1; fi
+			VHOST_DIR=${OPTARG}
+			#~Need to make sure supplied folder ends with '/'
+			;;
+		u)
+			#~Use the dir supplied by user(instead of creating dirs "/SITENAME/public_html/"
+			USE_EXISITNG_DIR="yes"
+			;;
+		D)
+			#~Store users directory directives if any, if none supplied but -D still used, give defaults
+			DIR_DIRECTIVES=${OPTARG}
+			;;
+		h)
+			#~Check that user-supplied html-file exists, exit if not
+			if [ ! -f "${OPTARG}" ]; then echo "ERROR: invalid html file at \"${OPTARG}\""; exit 1; fi
+			HTML_PATH=${OPTARG}
+			;;
+		A)
+			#~Store users desired alias
+			ALIAS=${OPTARG}
+			;;
+		P)
+			#~Checking that the supplied port value is a number, exit if not
+			if [[ ${OPTARG} =~ '[^0-9]$' ]]; then echo "ERROR: -p must be given a port number"; exit 1; fi
+			PORT_NUMBER=${OPTARG}
+			;;
+		I)
+			#~Make this take Ipv6 as well
+			#~Check if user supplied a plausible ipv4 address, exit if not
+			if [[ ! ${OPTARG} =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then echo "ERROR: provide valid ip address"; exit 1; fi
+			IP=${OPTARG}
+			;;
+		r)
+			RELOAD_AND_ENABLE="yes"
+			;;
+	esac
+done
+
+#~If user didn't run the -u switch to request to use a pre-existing dir we will build some dirs.
+if [ ! $USE_EXISTING_DIR ]
+then
+	#~If user gave a specific dir, set LOCATION to it, else set LOCATION to standard apache2 folder
+	if [ $VHOST_DIR ]; then LOCATION=$VHOST_DIR; else LOCATION="/var/www/html/"; fi
+	
+	#~Make two new dirs in LOCATION, one named after sitename(last arg given to this script) and a "public_html" folder to store the html
+	mkdir -p "$LOCATION${@: -1}/public_html/"
+	
+	#~Checking to see if dir was created, if not, remove any dir that might have been created anyway(probably too paranoid) and exit.
+	if [ ! -d "$LOCATION${@: -1}/public_html/" ]; then echo "ERROR: could not create dir: \"$LOCATION${@: -1}/public_html/\""; rm -r $LOCATION${@: -1}; exit 1; fi 
+	
+	#~If dir was created, store it for later use.
+	VALID_DIR="$LOCATION${@: -1}/public_html/" 
+
+#~If user wishes to just use a pre-existing folder we select it.
+else VALID_DIR=$VHOST_DIR; fi
+
+#~If user supplied HTML we copy it to VALID_DIR. If not, we make a default html with sitename in title.
+if [ $HTML_PATH ]; then cp $HTML_PATH $VALID_DIR; 
+else printf "<HTML>\n\t<title>${@: -1}</title>\n\t<body>\n\t\t<h1>Example HTML</h1>\n\t</body>\n</HTML>\n" >>  ${VALID_DIR}index.html; fi
+
+if [ ! $ALIAS ]; then ALIAS="www.${@: -1}"; fi #~If no alias supplied, we put www. behind sitename and use that as alias
+if [ ! $PORT_NUMBER ]; then PORT_NUMBER=80; fi #~If no port-number was supplied we use tcp port 80 as default
+if [ ! $IP ]; then IP="*"; fi #~If no IP address was given we use any("*")
+
+#~We create a vhost configuration based on what we have of info
+printf "<VirtualHost $IP:$PORT_NUMBER>
+\tServerName ${@: -1}
+\tServerAlias $ALIAS
+\tServerAdmin webmaster@${@: -1}
+\tDocumentRoot $VALID_DIR
+\tErrorLog \${APACHE_LOG_DIR}/error.log
+\tCustomLog \${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>\n\n" >> /etc/apache2/sites-available/${@: -1}.conf
+
+#~THIS SHOULD BE OPTIONAL.
+#~We create a Directory directive, either with options given by user or some defaults if user requests it.
+echo "<Directory $VALID_DIR>" >> /etc/apache2/sites-available/${@: -1}.conf
+if [ $DIR_DIRECTIVES ]; 
+then 
+	IFS='-'; for DIREC in $DIR_DIRECTIVES; do echo "	$(echo $DIREC | tr ',' ' ')" >> /etc/apache2/sites-available/${@: -1}.conf; done
+else 
+	printf "\tOptions Indexes FollowSymLinks\n\tAllowOverride None\n\tRequire all granted\n" >> /etc/apache2/sites-available/${@: -1}.conf 
+fi
+echo "</Directory>" >> /etc/apache2/sites-available/${@: -1}.conf
+
+#~Update the host-file in order to use the site locally
+printf "127.0.0.1\t${@: -1}\n$(cat /etc/hosts)" > /etc/hosts
+
+#~If user wishes to enable and reload immediately as indicated by the "-r" switch, we do that
+if [ $RELOAD_AND_ENABLE ]; then a2ensite ${@: -1}.conf; systemctl reload apache2; fi
